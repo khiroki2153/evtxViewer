@@ -29,6 +29,8 @@ export async function fetchEvents(params: {
   sort_by: string
   sort_desc: boolean
   filters: Record<string, string>
+  start: string
+  end: string
 }): Promise<EventsResult> {
   const res = await axios.get<EventsResult>('/api/events', {
     params: {
