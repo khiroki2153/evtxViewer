@@ -3,6 +3,7 @@ import json
 import csv
 import tempfile
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,18 +40,6 @@ def _parse_evtx(data: bytes) -> list[dict]:
                 event_data = event.get("Event", {}).get("EventData", {})
                 user_data = event.get("Event", {}).get("UserData", {})
 
-                extra: dict = {}
-                if event_data:
-                    for k, v in (event_data.items() if isinstance(event_data, dict) else {}):
-                        if k != "#attributes":
-                            extra[k] = v
-                if user_data:
-                    for section_val in (user_data.values() if isinstance(user_data, dict) else {}):
-                        if isinstance(section_val, dict):
-                            for k, v in section_val.items():
-                                if k != "#attributes":
-                                    extra[k] = v
-
                 provider = sys.get("Provider", {})
                 if isinstance(provider, dict):
                     provider_name = provider.get("#attributes", {}).get("Name", "")
@@ -77,19 +66,19 @@ def _parse_evtx(data: bytes) -> list[dict]:
                     event_id = str(event_id_raw) if event_id_raw != "" else ""
 
                 row = {
-                    "RecordId": str(record.get("event_record_id", "")),
                     "TimeCreated": sys.get("TimeCreated", {}).get("#attributes", {}).get("SystemTime", ""),
-                    "EventId": event_id,
                     "Level": _level_name(sys.get("Level", "")),
-                    "Channel": _scalar(sys.get("Channel", "")),
+                    "EventId": event_id,
                     "Provider": provider_name,
+                    "Message": _format_message(event_data, user_data),
+                    "Channel": _scalar(sys.get("Channel", "")),
                     "Computer": _scalar(sys.get("Computer", "")),
+                    "RecordId": str(record.get("event_record_id", "")),
                     "ProcessId": str(pid),
                     "ThreadId": str(tid),
                     "UserId": str(user_id),
                     "Task": _scalar(sys.get("Task", "")),
                     "Keywords": _scalar(sys.get("Keywords", "")),
-                    "Data": json.dumps(extra, ensure_ascii=False) if extra else "",
                 }
                 records.append(row)
             except Exception:
@@ -97,6 +86,58 @@ def _parse_evtx(data: bytes) -> list[dict]:
     finally:
         os.unlink(tmp_path)
     return records
+
+
+def _flatten_data(obj: Any) -> list[tuple[str | None, str]]:
+    """Flattens an EventData/UserData XML-to-dict subtree into (name, text)
+    pairs, the way Event Viewer renders a message body: a field gets a
+    "Name=value" label only when the XML element had an explicit Name
+    attribute, otherwise just its bare text is kept. XML parsing artifacts
+    (#attributes / #text wrappers) and empty/None values are dropped.
+    """
+    if obj is None:
+        return []
+    if isinstance(obj, dict):
+        attrs = obj.get("#attributes")
+        name = attrs.get("Name") if isinstance(attrs, dict) else None
+        results: list[tuple[str | None, str]] = []
+        text = obj.get("#text")
+        if text is not None:
+            results.extend((name, val) for _, val in _flatten_data(text))
+        for k, v in obj.items():
+            if k in ("#attributes", "#text"):
+                continue
+            results.extend(_flatten_data(v))
+        return results
+    if isinstance(obj, list):
+        results = []
+        for item in obj:
+            results.extend(_flatten_data(item))
+        return results
+    s = str(obj).strip()
+    return [(None, s)] if s and s.lower() != "none" else []
+
+
+def _format_message(event_data: Any, user_data: Any) -> str:
+    pairs = _flatten_data(event_data) + _flatten_data(user_data)
+    parts = [f"{name}={val}" if name else val for name, val in pairs]
+    return ", ".join(parts)
+
+
+def _parse_naive_datetime(s: str) -> datetime | None:
+    if not s:
+        return None
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1]
+    else:
+        # strip a trailing numeric UTC offset like +09:00 / -05:00, if present
+        if len(s) >= 6 and s[-6] in "+-" and s[-3] == ":":
+            s = s[:-6]
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 def _scalar(v: Any) -> str:
@@ -111,6 +152,54 @@ def _level_name(level: Any) -> str:
     return mapping.get(level, str(level) if level != "" else "")
 
 
+_DATETIME_HEADER_ALIASES = {
+    "timecreated", "time created", "date and time", "date/time", "datetime",
+    "date time", "timestamp", "日付と時刻", "日時", "発生日時", "タイムスタンプ",
+}
+
+
+def _detect_datetime_column(columns: list[str], records: list[dict]) -> str | None:
+    """Finds the CSV column holding the event timestamp so it can be
+    normalized to "TimeCreated", giving CSV files the same date-range
+    filtering UI/behavior as evtx files."""
+    if "TimeCreated" in columns:
+        return None
+    for c in columns:
+        if c.strip().lower() in _DATETIME_HEADER_ALIASES:
+            return c
+    if not records:
+        return None
+    sample = records[: min(50, len(records))]
+    best_col, best_ratio = None, 0.0
+    for c in columns:
+        if c in ("Message", "RecordId"):
+            continue
+        values = [str(r.get(c, "")).strip() for r in sample if str(r.get(c, "")).strip()]
+        if not values:
+            continue
+        parsed = pd.to_datetime(pd.Series(values), errors="coerce", format="mixed")
+        ratio = parsed.notna().mean()
+        if ratio > best_ratio:
+            best_ratio, best_col = ratio, c
+    return best_col if best_ratio >= 0.8 else None
+
+
+def _rename_and_normalize_datetime(records: list[dict], col: str | None) -> list[dict]:
+    """Renames `col` to "TimeCreated" and rewrites its values to the naive
+    ISO "YYYY-MM-DDTHH:MM:SS" format the rest of the app assumes."""
+    if not col or col == "TimeCreated":
+        return records
+    raws = [r.get(col, "") for r in records]
+    parsed = pd.to_datetime(pd.Series(raws), errors="coerce", format="mixed")
+    normalized = parsed.dt.strftime("%Y-%m-%dT%H:%M:%S")
+    out = []
+    for i, r in enumerate(records):
+        norm_val = normalized.iloc[i]
+        new_val = norm_val if isinstance(norm_val, str) else raws[i]
+        out.append({("TimeCreated" if k == col else k): (new_val if k == col else v) for k, v in r.items()})
+    return out
+
+
 def _parse_csv(data: bytes) -> list[dict]:
     for enc in ("utf-8-sig", "utf-8", "cp932", "latin-1"):
         try:
@@ -121,12 +210,43 @@ def _parse_csv(data: bytes) -> list[dict]:
     else:
         text = data.decode("utf-8", errors="replace")
 
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = next(reader)
+    except StopIteration:
+        return []
+
+    # some evtx-to-csv exporters leave the message/description column
+    # header blank; name it "Message" so it lines up with the evtx parser's
+    # column and gets the wide/clamped treatment in the UI
+    blanks_seen = 0
+    columns = []
+    for h in header:
+        name = h.strip()
+        if not name:
+            blanks_seen += 1
+            name = "Message" if blanks_seen == 1 else f"Column{blanks_seen}"
+        columns.append(name)
+
+    ncols = len(columns)
+    has_message_col = "Message" in columns
+
+    # Windows Event Viewer's CSV export has no header at all for the message
+    # text, and doesn't quote it, so a message containing commas spills into
+    # extra unheaded fields at the end of the row (e.g. 5 header columns but
+    # 6+ data fields). Reassemble those trailing fields into "Message".
     records = []
     for i, row in enumerate(reader):
-        clean = {k: str(v) if v is not None else "" for k, v in row.items() if k is not None}
+        clean = {columns[j]: row[j] for j in range(ncols) if j < len(row)}
+        for j in range(len(row), ncols):
+            clean[columns[j]] = ""
+        if not has_message_col:
+            clean["Message"] = ",".join(row[ncols:]) if len(row) > ncols else ""
         clean["RecordId"] = str(i + 1)
         records.append(clean)
+
+    datetime_col = _detect_datetime_column(columns, records)
+    records = _rename_and_normalize_datetime(records, datetime_col)
     return records
 
 
@@ -160,6 +280,8 @@ def get_events(
     sort_by: str = Query(""),
     sort_desc: bool = Query(False),
     filters: str = Query("{}"),
+    start: str = Query(""),
+    end: str = Query(""),
 ):
     records = _sessions.get(session_id)
     if records is None:
@@ -172,15 +294,46 @@ def get_events(
 
     result = records
 
-    # column filters
+    # column filters (a leading "-" negates: exclude rows containing the term)
     for col, val in filter_map.items():
-        if val:
-            result = [r for r in result if val.lower() in str(r.get(col, "")).lower()]
+        if not val:
+            continue
+        negate = val.startswith("-") and len(val) > 1
+        term = val[1:].lower() if negate else val.lower()
+        result = [r for r in result if (term in str(r.get(col, "")).lower()) != negate]
 
-    # full-text search
+    # date/time range filter (naive comparison; caller pre-converts to the
+    # timezone TimeCreated is expressed in)
+    start_dt = _parse_naive_datetime(start)
+    end_dt = _parse_naive_datetime(end)
+    if start_dt or end_dt:
+        def _in_range(r: dict) -> bool:
+            dt = _parse_naive_datetime(str(r.get("TimeCreated", "")))
+            if dt is None:
+                return False
+            if start_dt and dt < start_dt:
+                return False
+            if end_dt and dt > end_dt:
+                return False
+            return True
+        result = [r for r in result if _in_range(r)]
+
+    # full-text search: space-separated tokens are ANDed together; a token
+    # prefixed with "-" must NOT be present in any field (Splunk/Gmail-style
+    # exclusion, e.g. "logon -failure")
     if search:
-        search_lower = search.lower()
-        result = [r for r in result if any(search_lower in str(v).lower() for v in r.values())]
+        tokens = search.split()
+
+        def _row_matches(r: dict) -> bool:
+            for tok in tokens:
+                negate = tok.startswith("-") and len(tok) > 1
+                term = tok[1:].lower() if negate else tok.lower()
+                present = any(term in str(v).lower() for v in r.values())
+                if present == negate:
+                    return False
+            return True
+
+        result = [r for r in result if _row_matches(r)]
 
     total_filtered = len(result)
 
@@ -195,9 +348,9 @@ def get_events(
         result = sorted(result, key=sort_key, reverse=sort_desc)
 
     # paginate
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_records = result[start:end]
+    page_start = (page - 1) * page_size
+    page_end = page_start + page_size
+    page_records = result[page_start:page_end]
 
     return {
         "total": total_filtered,
