@@ -1,0 +1,11 @@
+options(
+  link: {
+    "js": {
+      "exports": [
+        "parse_evtx_records", "parse_csv_records", "query_events_json",
+        "row_to_csv_json",
+      ],
+      "format": "esm",
+    },
+  },
+)

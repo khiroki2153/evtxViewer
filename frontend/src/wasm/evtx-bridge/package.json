@@ -1,0 +1,15 @@
+{
+  "name": "evtx-bridge",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "evtx_bridge_bg.wasm",
+    "evtx_bridge.js",
+    "evtx_bridge.d.ts"
+  ],
+  "main": "evtx_bridge.js",
+  "types": "evtx_bridge.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

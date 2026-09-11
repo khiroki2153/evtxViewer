@@ -2,8 +2,7 @@ import { useState } from 'react'
 import { DropZone } from './components/DropZone'
 import { EventTable } from './components/EventTable'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { uploadFile, type UploadResult } from './api/client'
-import type { AxiosError } from 'axios'
+import { uploadFile, closeSession, type UploadResult } from './api/client'
 import './App.css'
 
 function App() {
@@ -18,12 +17,15 @@ function App() {
       const result = await uploadFile(file)
       setSession(result)
     } catch (e: unknown) {
-      const axiosErr = e as AxiosError<{ detail: string }>
-      const msg = axiosErr.response?.data?.detail ?? (e instanceof Error ? e.message : 'Upload failed')
-      setError(String(msg))
+      setError(e instanceof Error ? e.message : 'Upload failed')
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleClose = () => {
+    if (session) closeSession(session.session_id)
+    setSession(null)
   }
 
   return (
@@ -34,7 +36,7 @@ function App() {
           <div className="header-meta">
             <span className="badge">{session.file_type.toUpperCase()}</span>
             <span>{session.session_id}</span>
-            <button className="btn-secondary" onClick={() => setSession(null)}>Close</button>
+            <button className="btn-secondary" onClick={handleClose}>Close</button>
           </div>
         )}
       </header>
