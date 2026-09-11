@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { fetchEvents } from '../api/client'
+import { fetchEvents, rowToCsv } from '../api/client'
 import { formatTimeCreated, getBrowserTimeZone, listTimeZones, targetInputToSourceNaive, utcInstantToZonedNaiveString } from '../lib/timezone'
 
 const CHUNK_SIZE = 500
@@ -45,17 +45,6 @@ interface Props {
 }
 
 type Row = Record<string, string>
-
-function toCsvField(v: string): string {
-  return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
-}
-
-/** Serializes a single row (header line + value line) as CSV text for clipboard/evidence use. */
-function rowToCsv(columns: string[], row: Row): string {
-  const header = columns.map((c) => toCsvField(c)).join(',')
-  const values = columns.map((c) => toCsvField(row[c] ?? '')).join(',')
-  return `${header}\r\n${values}`
-}
 
 export function EventTable({ sessionId, columns, totalRecords }: Props) {
   const hasTimeCreated = columns.includes('TimeCreated')
