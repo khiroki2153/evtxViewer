@@ -81,3 +81,23 @@ export function targetInputToSourceNaive(inputValue: string, sourceTz: string, t
   if (!instant) return ''
   return utcInstantToZonedNaiveString(instant, sourceTz)
 }
+
+/**
+ * Builds a pair of <input type="datetime-local"> values (wall-clock in
+ * `targetTz`) spanning `windowMinutes` on either side of a raw TimeCreated
+ * value (naive wall-clock in `sourceTz`), for the "±N around this row"
+ * date-filter shortcut.
+ */
+export function rangeAroundTimeCreated(
+  raw: string,
+  windowMinutes: number,
+  sourceTz: string,
+  targetTz: string,
+): { start: string; end: string } | null {
+  const instant = zonedWallClockToUtcInstant(stripTzMarker(raw), sourceTz)
+  if (!instant) return null
+  const windowMs = windowMinutes * 60000
+  const start = utcInstantToZonedNaiveString(new Date(instant.getTime() - windowMs), targetTz).slice(0, 19)
+  const end = utcInstantToZonedNaiveString(new Date(instant.getTime() + windowMs), targetTz).slice(0, 19)
+  return { start, end }
+}

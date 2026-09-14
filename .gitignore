@@ -4,3 +4,4 @@ moonbit/_build/
 moonbit/.mooncakes/
 moonbit/.moonagent/
 target/
+.notes/

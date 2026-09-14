@@ -53,6 +53,7 @@ function App() {
               sessionId={session.session_id}
               columns={session.columns}
               totalRecords={session.total}
+              fileType={session.file_type}
             />
           </ErrorBoundary>
         </main>

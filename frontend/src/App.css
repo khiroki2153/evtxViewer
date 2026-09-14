@@ -320,6 +320,18 @@ tr.level-verbose td { color: #707070; }
   font-size: 11px;
   line-height: 1;
 }
+.detail-actions-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+  background: var(--face);
+  border-bottom: 1px solid #808080;
+  flex-shrink: 0;
+}
+.detail-actions-bar .btn-secondary { padding: 2px 7px; font-size: 11px; }
+.detail-actions-bar .filter-label { font-size: 11px; white-space: nowrap; }
 .detail-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .detail-table th {
   width: 130px;

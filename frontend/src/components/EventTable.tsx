@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { fetchEvents, rowToCsv } from '../api/client'
-import { formatTimeCreated, getBrowserTimeZone, listTimeZones, targetInputToSourceNaive, utcInstantToZonedNaiveString } from '../lib/timezone'
+import { formatTimeCreated, getBrowserTimeZone, listTimeZones, rangeAroundTimeCreated, targetInputToSourceNaive, utcInstantToZonedNaiveString } from '../lib/timezone'
 
 const CHUNK_SIZE = 500
 const LOAD_MORE_THRESHOLD = 20
@@ -31,6 +31,12 @@ const RELATIVE_PRESETS: { label: string; minutes: number }[] = [
   { label: '7d', minutes: 60 * 24 * 7 },
 ]
 
+const AROUND_PRESETS: { label: string; minutes: number }[] = [
+  { label: '±1m', minutes: 1 },
+  { label: '±5m', minutes: 5 },
+  { label: '±1h', minutes: 60 },
+]
+
 function shiftDateStr(dateStr: string, days: number): string {
   const [y, m, d] = dateStr.split('-').map(Number)
   const dt = new Date(Date.UTC(y, m - 1, d))
@@ -42,11 +48,12 @@ interface Props {
   sessionId: string
   columns: string[]
   totalRecords: number
+  fileType: 'evtx' | 'csv'
 }
 
 type Row = Record<string, string>
 
-export function EventTable({ sessionId, columns, totalRecords }: Props) {
+export function EventTable({ sessionId, columns, totalRecords, fileType }: Props) {
   const hasTimeCreated = columns.includes('TimeCreated')
 
   const [records, setRecords] = useState<Row[]>([])
@@ -60,7 +67,12 @@ export function EventTable({ sessionId, columns, totalRecords }: Props) {
   const [endInput, setEndInput] = useState('')
   const [debouncedStart, setDebouncedStart] = useState('')
   const [debouncedEnd, setDebouncedEnd] = useState('')
-  const [sourceTz, setSourceTz] = useState('UTC')
+  // evtx's TimeCreated is always recorded in UTC. CSV exports have no such
+  // guarantee -- unlike evtx there's no fixed on-disk format dictating it,
+  // so most tools (Event Viewer's own CSV export included) write it in
+  // whatever timezone the exporting machine's clock was set to, i.e. the
+  // browser's local zone is the better default guess than UTC.
+  const [sourceTz, setSourceTz] = useState(() => (fileType === 'csv' ? getBrowserTimeZone() : 'UTC'))
   const [targetTz, setTargetTz] = useState(() => getBrowserTimeZone())
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -96,15 +108,19 @@ export function EventTable({ sessionId, columns, totalRecords }: Props) {
   const parentRef = useRef<HTMLDivElement>(null)
   const nextPageRef = useRef(1)
   const loadingMoreRef = useRef(false)
+  // While a "jump to row" is in flight, the filter-change effect below must
+  // not race it with its own reload (it would either clobber the jump's
+  // wider page_size or double-fetch) -- see jumpToRow.
+  const jumpingRef = useRef(false)
 
-  const loadChunk = useCallback(async (page: number, replace: boolean) => {
+  const loadChunk = useCallback(async (page: number, replace: boolean, pageSizeOverride?: number) => {
     if (replace) setLoading(true)
     else setLoadingMore(true)
     try {
       const res = await fetchEvents({
         session_id: sessionId,
         page,
-        page_size: CHUNK_SIZE,
+        page_size: pageSizeOverride ?? CHUNK_SIZE,
         search: debouncedSearch,
         sort_by: sortBy,
         sort_desc: sortDesc,
@@ -115,6 +131,7 @@ export function EventTable({ sessionId, columns, totalRecords }: Props) {
       setRecords((prev) => (replace ? res.records : [...prev, ...res.records]))
       setFilteredTotal(res.total)
       nextPageRef.current = page + 1
+      return res.records
     } finally {
       if (replace) setLoading(false)
       else setLoadingMore(false)
@@ -123,6 +140,7 @@ export function EventTable({ sessionId, columns, totalRecords }: Props) {
   }, [sessionId, debouncedSearch, sortBy, sortDesc, colFilters, startParam, endParam])
 
   useEffect(() => {
+    if (jumpingRef.current) return
     nextPageRef.current = 1
     loadChunk(1, true)
     parentRef.current?.scrollTo({ top: 0 })
@@ -201,6 +219,73 @@ export function EventTable({ sessionId, columns, totalRecords }: Props) {
     if (!dayStr) return
     setStartInput(`${dayStr}T00:00:00`)
     setEndInput(`${shiftDateStr(dayStr, 1)}T00:00:00`)
+  }
+
+  /** Sets the From/To date filter to a window of `minutes` on either side of `row`'s TimeCreated. */
+  const applyAroundRow = (row: Row, minutes: number) => {
+    const range = rangeAroundTimeCreated(row['TimeCreated'] ?? '', minutes, sourceTz, targetTz)
+    if (!range) return
+    setStartInput(range.start)
+    setEndInput(range.end)
+    setDetailRow(null)
+  }
+
+  /**
+   * Clears every filter/search/sort, then loads exactly enough rows (by
+   * this file's RecordId, which is always a 1-based sequential number in
+   * upload order) to include `row` and scrolls it into view. Used by the
+   * detail panel's "Jump to this row" button so a user can search for
+   * something, then see it in its original surrounding context.
+   */
+  const jumpToRow = async (row: Row) => {
+    const recordId = Number(row['RecordId'])
+    if (!Number.isFinite(recordId) || recordId < 1) return
+
+    jumpingRef.current = true
+    loadingMoreRef.current = true
+    setDetailRow(null)
+    setSearch('')
+    setDebouncedSearch('')
+    setColFilters({})
+    setStartInput('')
+    setEndInput('')
+    setDebouncedStart('')
+    setDebouncedEnd('')
+    setSortBy('')
+    setSortDesc(false)
+
+    try {
+      setLoading(true)
+      const res = await fetchEvents({
+        session_id: sessionId,
+        page: 1,
+        page_size: recordId,
+        search: '',
+        sort_by: '',
+        sort_desc: false,
+        filters: {},
+        start: '',
+        end: '',
+      })
+      setRecords(res.records)
+      setFilteredTotal(res.total)
+      nextPageRef.current = 2
+      const targetIndex = res.records.findIndex((r) => r['RecordId'] === row['RecordId'])
+      if (targetIndex >= 0) {
+        // Deferred so the virtualizer has re-measured against the just-set
+        // `records` before we ask it to scroll.
+        requestAnimationFrame(() => rowVirtualizer.scrollToIndex(targetIndex, { align: 'center' }))
+      }
+    } finally {
+      setLoading(false)
+      loadingMoreRef.current = false
+      // Deferred one tick past the filter-clearing state updates above so
+      // the reload effect they'd normally trigger sees jumpingRef already
+      // cleared -> false, i.e. it's allowed to run for any *further* filter
+      // changes the user makes, but not for this jump's own state clears
+      // (which already loaded their data above, with a wider page_size).
+      setTimeout(() => { jumpingRef.current = false }, 0)
+    }
   }
 
   const renderCell = (row: Row, col: string): string => {
@@ -356,6 +441,25 @@ export function EventTable({ sessionId, columns, totalRecords }: Props) {
                 </button>
                 <button className="detail-close" onClick={() => setDetailRow(null)}>✕</button>
               </div>
+            </div>
+            <div className="detail-actions-bar">
+              <button className="btn-secondary" onClick={() => jumpToRow(detailRow)}>
+                Jump to this row
+              </button>
+              {hasTimeCreated && detailRow['TimeCreated'] && (
+                <>
+                  <span className="filter-label">Filter around this row:</span>
+                  {AROUND_PRESETS.map((p) => (
+                    <button
+                      key={p.label}
+                      className="btn-secondary"
+                      onClick={() => applyAroundRow(detailRow, p.minutes)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </>
+              )}
             </div>
             <table className="detail-table">
               <tbody>
