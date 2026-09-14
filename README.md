@@ -35,6 +35,12 @@ cd frontend && pnpm build
 Static output lands in `frontend/dist/` — serve it with any static file
 host (no server-side runtime required).
 
+For container-based platforms, use the root `Dockerfile`: it runs
+`pnpm build` and serves `frontend/dist/` with [`serve`](https://github.com/vercel/serve)
+on `$PORT` (defaults to 8080). `start.sh` is for local dev only (it starts
+the Vite dev server, which doesn't bind `$PORT`) — don't point a deployment
+platform's start command at it.
+
 ## Rebuilding the wasm/MoonBit layers
 
 Only needed if you change `wasm/evtx-bridge/` or `moonbit/` — their build
