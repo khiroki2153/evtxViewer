@@ -31,7 +31,7 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>evtxViewer</h1>
+        <h1>evtxViewer <span className="app-version">v{__APP_VERSION__}</span></h1>
         {session && (
           <div className="header-meta">
             <span className="badge">{session.file_type.toUpperCase()}</span>

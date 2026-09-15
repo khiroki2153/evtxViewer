@@ -87,6 +87,12 @@ input:focus, select:focus { outline: 1px dotted #000080; }
   color: #ffffff;
   letter-spacing: 0.5px;
 }
+.app-version {
+  font-size: 10px;
+  font-weight: 400;
+  color: #dfe6ff;
+  letter-spacing: normal;
+}
 .header-meta {
   display: flex;
   align-items: center;
